@@ -54,6 +54,23 @@ def _size_caps(width: int, height: int) -> str:
     return f"video/x-raw,width={width},height={height}"
 
 
+# gst-pipewire (<= 1.0.x) registers pipewiresrc's node as
+# "Stream/Input/Unknown" because caps aren't fixed at connect time. Ubuntu's
+# WirePlumber 0.4 then derives media.type = nil and its canLink() check
+# rejects the match against the mutter stream ("target not found"), while the
+# no-target path crashes policy-node.lua outright. Declaring the class
+# ourselves makes target resolution work.
+_STREAM_PROPS = (
+    "stream-properties=props,"
+    "media.class=(string)Stream/Input/Video,"
+    "media.type=(string)Video"
+)
+
+
+def _src(target: str) -> str:
+    return f"pipewiresrc target-object={target} do-timestamp=true {_STREAM_PROPS}"
+
+
 def resolve_target(node_id: int) -> str:
     """Map mutter's PipeWire node id to what pipewiresrc's target-object
     property actually matches: the object.serial (PipeWire >= 0.3.64). Falls
@@ -79,7 +96,7 @@ class _BasePipeline:
         self._pipeline: Gst.Pipeline | None = None
         self._on_error: Callable[[str], None] | None = None
 
-    def _launch(self, description: str) -> None:
+    def _build(self, description: str) -> None:
         gst_init()
         log.debug("gst-launch %s", description)
         try:
@@ -89,10 +106,15 @@ class _BasePipeline:
         bus = self._pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message::error", self._bus_error)
+
+    def _play(self) -> None:
+        """Callbacks must be attached between _build and _play: caps can
+        negotiate synchronously inside set_state(PLAYING)."""
         ret = self._pipeline.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
+            desc = "pipeline refused to start"
             self.stop()
-            raise PipelineError(f"pipeline refused to start: {description}")
+            raise PipelineError(desc)
 
     def _bus_error(self, _bus: Gst.Bus, msg: Gst.Message) -> None:
         err, debug = msg.parse_error()
@@ -125,13 +147,15 @@ class KeepalivePipeline(_BasePipeline):
         self._on_size = on_size
         self._size_reported = False
         desc = (
-            f"pipewiresrc target-object={target} do-timestamp=true "
+            f"{_src(target)} "
             f"! capsfilter name=wd_caps caps={_size_caps(width, height)} "
             f"! fakesink sync=false async=false"
         )
-        self._launch(desc)
-        caps_elem = self._pipeline.get_by_name("wd_caps")
-        caps_elem.get_static_pad("src").connect("notify::caps", self._caps_changed)
+        self._build(desc)
+        pad = self._pipeline.get_by_name("wd_caps").get_static_pad("src")
+        pad.connect("notify::caps", self._caps_changed)
+        self._play()
+        self._caps_changed(pad, None)  # in case negotiation beat the connect
 
     def _caps_changed(self, pad: Gst.Pad, _pspec) -> None:
         caps = pad.get_current_caps()
@@ -166,7 +190,7 @@ class ClientPipeline(_BasePipeline):
         self._on_error = on_error
         self._on_frame = on_frame
         desc = (
-            f"pipewiresrc target-object={target} do-timestamp=true "
+            f"{_src(target)} "
             f"! {_size_caps(width, height)} "
             f"! queue leaky=downstream max-size-buffers=3 "
             f"! videoconvert "
@@ -174,9 +198,10 @@ class ClientPipeline(_BasePipeline):
             f"! appsink name=wd_sink emit-signals=true sync=false "
             f"max-buffers=4 drop=false"
         )
-        self._launch(desc)
+        self._build(desc)
         self._appsink = self._pipeline.get_by_name("wd_sink")
         self._appsink.connect("new-sample", self._new_sample)
+        self._play()
 
     def _new_sample(self, sink) -> Gst.FlowReturn:
         sample = sink.emit("pull-sample")
