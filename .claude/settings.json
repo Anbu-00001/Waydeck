@@ -17,7 +17,10 @@
       "Bash(timeout 30 python3 diag_negotiation.py)",
       "Bash(timeout 30 python3 diag_pwdump.py)",
       "Bash(gst-inspect-1.0 pipewiresrc *)",
-      "Bash(pipewire --version)"
+      "Bash(pipewire --version)",
+      "Bash(wireplumber --version)",
+      "Bash(wpctl --version)",
+      "Bash(journalctl --user -u wireplumber --since \"5 minutes ago\" --no-pager)"
     ]
   }
 }
