@@ -92,7 +92,7 @@ async def _run(cfg: Config) -> int:
     from .adapters.gnome import GnomeAdapter, screencast_api_version
     from .glibloop import GLibRunner
     from .server.app import WaydeckServer
-    from .stream.capture import KeepalivePipeline, PipelineError, gst_init
+    from .stream.capture import KeepalivePipeline, PipelineError, gst_init, resolve_target
     from .usb.adb import UsbDock
 
     loop = asyncio.get_running_loop()
@@ -154,9 +154,10 @@ async def _run(cfg: Config) -> int:
             loop.call_soon_threadsafe(request_shutdown, f"capture pipeline error: {msg}")
 
         await runner.acall(gst_init)
+        target = await runner.acall(resolve_target, node_id)
         try:
             keepalive = await runner.acall(
-                KeepalivePipeline, node_id, cfg.width, cfg.height, on_size, on_pipe_error
+                KeepalivePipeline, target, cfg.width, cfg.height, on_size, on_pipe_error
             )
         except PipelineError as e:
             return _fail(str(e), "Is gstreamer1.0-pipewire installed?")
@@ -175,7 +176,7 @@ async def _run(cfg: Config) -> int:
               f"arrange it in {bold('Settings → Displays')}")
 
         # 3. Server
-        server = WaydeckServer(cfg, runner, node_id, adapter.input)
+        server = WaydeckServer(cfg, runner, target, adapter.input)
         server.size = (width, height)
         await runner.acall(server.detect_h264)
         enc_desc = server.h264.kind if server.h264 else "none (JPEG only)"

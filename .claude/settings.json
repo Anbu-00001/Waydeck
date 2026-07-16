@@ -8,7 +8,16 @@
       "Bash(gdbus introspect *)",
       "Bash(sudo -n true)",
       "Bash(git init *)",
-      "Bash(git mv *)"
+      "Bash(git mv *)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -m pytest -q)",
+      "Bash(pipx run *)",
+      "Bash(timeout --signal=TERM 20 python3 -m waydeck --verbose --usb off)",
+      "Bash(timeout --signal=TERM 15 python3 -m waydeck --verbose --usb off)",
+      "Bash(timeout 30 python3 diag_negotiation.py)",
+      "Bash(timeout 30 python3 diag_pwdump.py)",
+      "Bash(gst-inspect-1.0 pipewiresrc *)",
+      "Bash(pipewire --version)"
     ]
   }
 }

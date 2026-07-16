@@ -31,7 +31,7 @@ import gi
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
-from .base import AdapterError, CompositorAdapter, InputInjector
+from .base import AdapterError, CompositorAdapter, InputInjector  # noqa: E402
 
 log = logging.getLogger(__name__)
 

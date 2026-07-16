@@ -21,7 +21,9 @@ streaming threads and hand frames to the caller as plain bytes.
 
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
 from collections.abc import Callable
 
 import gi
@@ -47,7 +49,29 @@ class PipelineError(RuntimeError):
 
 
 def _size_caps(width: int, height: int) -> str:
-    return f"video/x-raw,max-framerate=120/1,width={width},height={height}"
+    # Width/height only: mutter's virtual stream negotiates the refresh rate
+    # itself, and extra caps fields would over-constrain the intersection.
+    return f"video/x-raw,width={width},height={height}"
+
+
+def resolve_target(node_id: int) -> str:
+    """Map mutter's PipeWire node id to what pipewiresrc's target-object
+    property actually matches: the object.serial (PipeWire >= 0.3.64). Falls
+    back to the raw node id, which older stacks matched directly."""
+    try:
+        out = subprocess.run(
+            ["pw-dump"], capture_output=True, text=True, timeout=5
+        ).stdout
+        for obj in json.loads(out):
+            if obj.get("id") == node_id:
+                props = (obj.get("info") or {}).get("props") or {}
+                serial = props.get("object.serial")
+                if serial is not None:
+                    log.debug("node %d -> object.serial %s", node_id, serial)
+                    return str(serial)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+        log.debug("pw-dump lookup failed (%s); using node id directly", e)
+    return str(node_id)
 
 
 class _BasePipeline:
@@ -90,7 +114,7 @@ class KeepalivePipeline(_BasePipeline):
 
     def __init__(
         self,
-        node_id: int,
+        target: str,
         width: int,
         height: int,
         on_size: Callable[[int, int], None],
@@ -101,7 +125,7 @@ class KeepalivePipeline(_BasePipeline):
         self._on_size = on_size
         self._size_reported = False
         desc = (
-            f"pipewiresrc path={node_id} do-timestamp=true "
+            f"pipewiresrc target-object={target} do-timestamp=true "
             f"! capsfilter name=wd_caps caps={_size_caps(width, height)} "
             f"! fakesink sync=false async=false"
         )
@@ -131,7 +155,7 @@ class ClientPipeline(_BasePipeline):
 
     def __init__(
         self,
-        node_id: int,
+        target: str,
         width: int,
         height: int,
         encoder_fragment: str,
@@ -142,7 +166,7 @@ class ClientPipeline(_BasePipeline):
         self._on_error = on_error
         self._on_frame = on_frame
         desc = (
-            f"pipewiresrc path={node_id} do-timestamp=true "
+            f"pipewiresrc target-object={target} do-timestamp=true "
             f"! {_size_caps(width, height)} "
             f"! queue leaky=downstream max-size-buffers=3 "
             f"! videoconvert "

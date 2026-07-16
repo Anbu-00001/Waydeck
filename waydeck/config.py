@@ -58,7 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
             "One command. No app. No dongle."
         ),
     )
-    p.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"TCP port (default {DEFAULT_PORT})")
+    p.add_argument(
+        "--port", type=int, default=DEFAULT_PORT, help=f"TCP port (default {DEFAULT_PORT})"
+    )
     p.add_argument(
         "--bind",
         default="",

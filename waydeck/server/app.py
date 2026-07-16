@@ -69,10 +69,10 @@ class FrameRelay:
 
 
 class WaydeckServer:
-    def __init__(self, cfg: Config, runner, node_id: int, injector) -> None:
+    def __init__(self, cfg: Config, runner, target: str, injector) -> None:
         self.cfg = cfg
         self.runner = runner
-        self.node_id = node_id
+        self.target = target  # pipewiresrc target-object (object.serial)
         self.injector = injector
         # Actual size can differ from requested if the compositor overrides.
         self.size: tuple[int, int] = (cfg.width, cfg.height)
@@ -193,7 +193,7 @@ class WaydeckServer:
             )
             pipeline = await self.runner.acall(
                 ClientPipeline,
-                self.node_id,
+                self.target,
                 w,
                 h,
                 fragment,
