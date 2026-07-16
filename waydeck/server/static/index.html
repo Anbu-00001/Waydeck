@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>waydeck</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="stage"><canvas id="screen"></canvas></div>
+
+<div id="overlay"><div id="overlay-msg">connecting…</div></div>
+
+<div id="hud" class="hidden"></div>
+
+<div id="btns">
+  <button id="btn-full" title="fullscreen">⛶</button>
+  <button id="btn-kbd" title="keyboard">⌨</button>
+  <button id="btn-hud" title="stats">▤</button>
+</div>
+
+<input id="kbd" type="text" autocomplete="off" autocorrect="off"
+       autocapitalize="off" spellcheck="false" aria-hidden="true">
+
+<script src="client.js"></script>
+</body>
+</html>
