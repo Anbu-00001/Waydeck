@@ -1,5 +1,10 @@
-"""waydeck CLI: one command that creates the monitor, starts the server,
-prints the QR, and tears everything down cleanly on Ctrl-C."""
+"""waydeck CLI: one command that starts the server, prints the QR, creates a
+screen for each phone that connects, and tears everything down on Ctrl-C.
+
+M2.1: monitors are provisioned per-connecting-device (see waydeck/device.py)
+instead of one fixed monitor at startup. Non-verbose output follows the
+plain-language rule: device names, never compositor/session jargon — the
+technical detail lives behind --verbose."""
 
 from __future__ import annotations
 
@@ -88,11 +93,11 @@ def main(argv: list[str] | None = None) -> int:
 
 async def _run(cfg: Config) -> int:
     # Imports that need gi live here so `waydeck --help` works anywhere.
-    from .adapters.base import AdapterError
-    from .adapters.gnome import GnomeAdapter, screencast_api_version
+    from .adapters.gnome import screencast_api_version
+    from .device import DeviceManager
     from .glibloop import GLibRunner
     from .server.app import WaydeckServer
-    from .stream.capture import KeepalivePipeline, PipelineError, gst_init, resolve_target
+    from .stream.capture import gst_init
     from .usb.adb import UsbDock
 
     loop = asyncio.get_running_loop()
@@ -110,79 +115,32 @@ async def _run(cfg: Config) -> int:
     runner = GLibRunner()
     runner.start()
 
-    adapter = GnomeAdapter()
-    keepalive = None
     server = None
     usb = None
     try:
+        # Version-gate the compositor API up front so failure is immediate
+        # and specific, not deferred to the first phone connecting.
         version = await runner.acall(screencast_api_version)
-        print(f"\n  {bold('waydeck')} v{__version__} — GNOME adapter "
-              f"{dim(f'(Mutter ScreenCast API v{version})') if version else ''}")
-
-        # 1. Virtual monitor session
-        node_fut: asyncio.Future[int] = loop.create_future()
-
-        def on_node(node_id: int) -> None:
-            loop.call_soon_threadsafe(
-                lambda: node_fut.set_result(node_id) if not node_fut.done() else None
-            )
-
-        def on_closed(reason: str) -> None:
-            loop.call_soon_threadsafe(request_shutdown, reason)
-
-        try:
-            await runner.acall(adapter.start, on_node, on_closed)
-        except AdapterError as e:
-            return _fail(str(e))
-        try:
-            node_id = await asyncio.wait_for(node_fut, timeout=15)
-        except asyncio.TimeoutError:
+        if version is None:
             return _fail(
-                "Mutter never announced the PipeWire stream (15s timeout).",
-                "Try --verbose; check `journalctl --user -u gnome-shell` for errors.",
+                "couldn't reach the desktop's screen-sharing service — "
+                "is this a GNOME session on Wayland?"
             )
+        print(f"\n  {bold('waydeck')} v{__version__} "
+              f"{dim(f'(GNOME, ScreenCast API v{version})')}")
 
-        # 2. Keepalive pipeline — makes the monitor materialize and pins its size
-        size_fut: asyncio.Future[tuple[int, int]] = loop.create_future()
+        def on_device_event(msg: str) -> None:
+            print(f"  {green('●')} {msg}")
 
-        def on_size(w: int, h: int) -> None:
-            loop.call_soon_threadsafe(
-                lambda: size_fut.set_result((w, h)) if not size_fut.done() else None
-            )
-
-        def on_pipe_error(msg: str) -> None:
-            loop.call_soon_threadsafe(request_shutdown, f"capture pipeline error: {msg}")
-
+        manager = DeviceManager(cfg, runner, on_event=on_device_event)
+        server = WaydeckServer(cfg, runner, manager)
         await runner.acall(gst_init)
-        target = await runner.acall(resolve_target, node_id)
-        try:
-            keepalive = await runner.acall(
-                KeepalivePipeline, target, cfg.width, cfg.height, on_size, on_pipe_error
-            )
-        except PipelineError as e:
-            return _fail(str(e), "Is gstreamer1.0-pipewire installed?")
-        try:
-            width, height = await asyncio.wait_for(size_fut, timeout=10)
-        except asyncio.TimeoutError:
-            return _fail(
-                "PipeWire format negotiation timed out.",
-                f"The compositor may have rejected {cfg.width}x{cfg.height}; "
-                "try another --size.",
-            )
-        if (width, height) != (cfg.width, cfg.height):
-            print(f"  {yellow('!')} compositor negotiated {width}x{height} "
-                  f"instead of {cfg.width}x{cfg.height}")
-        print(f"  {green('✓')} virtual monitor {bold(f'{width}x{height}')} created — "
-              f"arrange it in {bold('Settings → Displays')}")
-
-        # 3. Server
-        server = WaydeckServer(cfg, runner, target, adapter.input)
-        server.size = (width, height)
         await runner.acall(server.detect_h264)
-        enc_desc = server.h264.kind if server.h264 else "none (JPEG only)"
-        print(f"  {green('✓')} H.264 encoder: {enc_desc}   input: {cfg.input_mode}")
+        if cfg.verbose:
+            enc_desc = server.h264.kind if server.h264 else "none (JPEG only)"
+            log.debug("H.264 encoder: %s; input mode: %s", enc_desc, cfg.input_mode)
 
-        # 4. Addresses: LAN + localhost (the latter for USB mode)
+        # Addresses: LAN + localhost (the latter for USB mode)
         lan = cfg.bind or lan_address()
         binds = [addr for addr in dict.fromkeys([lan, "127.0.0.1"]) if addr]
         for addr in binds:
@@ -190,7 +148,7 @@ async def _run(cfg: Config) -> int:
                 return _fail(f"port {cfg.port} is busy on {addr}", "pick another with --port")
         await server.start(binds)
 
-        # 5. USB dock mode
+        # USB dock mode
         usb_active = False
         if cfg.usb != "off":
             usb = UsbDock(cfg.port)
@@ -208,44 +166,38 @@ async def _run(cfg: Config) -> int:
 
         if usb_active:
             opened = cfg.open_browser and usb.open_url(usb_url)
-            note = "browser opened on phone" if opened else "open this on the phone"
-            print(f"  {green('✓')} USB dock: {usb.serial} (adb reverse tcp:{cfg.port}) — {note}")
-            print(f"    {cyan(usb_url)}  {dim('(secure context: H.264 + wake lock)')}")
+            note = "opening on the phone…" if opened else "open this on the phone:"
+            print(f"  {green('✓')} phone connected by USB — {note}")
+            print(f"    {cyan(usb_url)}")
         if lan_url:
-            fallback = " (JPEG fallback on plain HTTP)" if server.h264 else ""
-            print(f"  {green('→')} LAN: {cyan(lan_url)}{dim(fallback)}")
-            print(f"    {yellow('unencrypted on your LAN — anyone with this URL can view')}")
+            print(f"  {green('→')} on the same WiFi, scan the QR or open: {cyan(lan_url)}")
+            lan_warning = "this link is unencrypted on your network — anyone who has it can view"
+            print(f"    {yellow(lan_warning)}")
 
         qr_url = lan_url if (lan_url and not usb_active) else usb_url
         code = terminal_qr(qr_url)
         if code:
             print("\n" + code)
         else:
-            print(f"\n  {yellow('!')} python3-qrcode not installed — no QR; "
-                  "type the URL on the phone instead")
+            print(f"\n  {yellow('!')} QR unavailable (install python3-qrcode) — "
+                  "type the link on the phone instead")
 
-        def on_client(desc: str) -> None:
-            stamp = green("● client connected") if desc else dim("○ client disconnected")
-            print(f"  {stamp} {desc}")
+        hint = (
+            f"Each phone that connects gets its own screen (up to "
+            f"{cfg.max_devices}). Ctrl-C stops everything."
+        )
+        print(f"  {dim(hint)}\n")
 
-        server.on_client_change = on_client
-
-        print(f"\n  {dim('Ctrl-C stops and removes the monitor cleanly.')}\n")
-
-        # 6. Run until stopped
         await shutdown.wait()
         if shutdown_reason:
-            print(f"\n  {yellow('!')} shutting down: {shutdown_reason[0]}")
+            print(f"\n  {yellow('!')} stopping: {shutdown_reason[0]}")
         return 0
     finally:
-        # Teardown in reverse: clients, sockets, USB, pipeline, session.
-        # The session Stop is what removes the monitor — never skip it.
+        # server.stop() shuts down the DeviceManager first: every device's
+        # session Stop is what removes its monitor — never skip it.
         if server:
             await server.stop()
         if usb:
             usb.stop()
-        if keepalive:
-            await runner.acall(keepalive.stop)
-        await runner.acall(adapter.stop)
         runner.stop()
-        print(f"  {green('✓')} torn down — virtual monitor removed\n")
+        print(f"  {green('✓')} all screens removed — goodbye\n")

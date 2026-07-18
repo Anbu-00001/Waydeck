@@ -51,15 +51,20 @@ def pick_h264(preference: str, bitrate_kbps: int, keyframe_interval: int) -> H26
 
     parse = "h264parse config-interval=-1"
     candidates: list[H264Encoder] = [
+        # The profile capsfilter is load-bearing: the codec string we send the
+        # browser MUST describe what the encoder actually emits, so force the
+        # profile at negotiation time — a mismatch fails the pipeline loudly
+        # instead of streaming bytes the codec string lies about.
         H264Encoder(
             "vah264",
-            f"vah264enc bitrate={bitrate_kbps} key-int-max={keyframe_interval} ! {parse}",
+            f"vah264enc bitrate={bitrate_kbps} key-int-max={keyframe_interval} "
+            f"! video/x-h264,profile=main ! {parse}",
             _CODEC_MAIN,
         ),
         H264Encoder(
             "vaapi",
             f"vaapih264enc rate-control=cbr bitrate={bitrate_kbps} "
-            f"keyframe-period={keyframe_interval} ! {parse}",
+            f"keyframe-period={keyframe_interval} ! video/x-h264,profile=main ! {parse}",
             _CODEC_MAIN,
         ),
         H264Encoder(

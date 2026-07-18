@@ -106,6 +106,9 @@ function connect() {
       webcodecs: 'VideoDecoder' in window,
       secure: window.isSecureContext,
       ua: navigator.userAgent,
+      // Reattach to our lingering screen after a reload/drop instead of
+      // making the server create a fresh monitor.
+      device: sessionStorage.getItem('wd-device') || null,
     }));
   };
 
@@ -133,6 +136,7 @@ function onText(msg) {
   switch (msg.t) {
     case 'config':
       cfg = msg;
+      if (cfg.device) sessionStorage.setItem('wd-device', cfg.device);
       canvas.width = cfg.width;
       canvas.height = cfg.height;
       layout();

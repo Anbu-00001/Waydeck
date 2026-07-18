@@ -141,6 +141,13 @@ waydeck --help
 - Single Client: Supports one active client connection at a time. Connecting a second device disconnects the existing session.
 - Features Not Yet Implemented: Audio passthrough and active stylus (pressure/tilt) input are currently omitted.
 
+## Roadmap
+
+Phase 2 (KDE and wlroots adapters, a non-technical companion interface,
+multi-device support, offline hotspot pairing, and the window-placement
+fix) is planned in detail, with cited research on the risky parts, in
+[docs/phase2_plan.md](docs/phase2_plan.md).
+
 ## Development and Testing
 
 Clone the repository and run locally:

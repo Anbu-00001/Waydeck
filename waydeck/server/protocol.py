@@ -58,13 +58,16 @@ class ClientHello:
     webcodecs: bool = False
     secure: bool = False
     user_agent: str = ""
+    device_id: str | None = None  # previous device id for reconnect-reattach
 
     @classmethod
     def from_msg(cls, msg: dict) -> ClientHello:
+        raw_device = msg.get("device")
         return cls(
             webcodecs=bool(msg.get("webcodecs")),
             secure=bool(msg.get("secure")),
             user_agent=str(msg.get("ua", ""))[:200],
+            device_id=str(raw_device)[:32] if raw_device else None,
         )
 
 

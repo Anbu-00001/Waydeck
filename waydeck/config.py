@@ -12,6 +12,12 @@ DEFAULT_SIZE = "1920x1080"
 DEFAULT_JPEG_QUALITY = 80
 DEFAULT_H264_BITRATE_KBPS = 8000
 DEFAULT_KEYFRAME_INTERVAL = 60  # frames between forced IDR frames
+# Each device costs a compositor session + a capture pipeline; 4 covers a
+# desk full of phones while bounding resource use. Raise with --max-devices.
+DEFAULT_MAX_DEVICES = 4
+# Seconds a disconnected device's monitor survives awaiting reconnect, so a
+# page reload or brief WiFi drop doesn't destroy the screen arrangement.
+DEFAULT_LINGER_S = 45.0
 
 _SIZE_RE = re.compile(r"^(\d{3,5})x(\d{3,5})$")
 
@@ -29,6 +35,8 @@ class Config:
     transport: str = "auto"  # auto | jpeg | h264
     input_mode: str = "touch"  # touch | pointer
     usb: str = "auto"  # auto | on | off
+    max_devices: int = DEFAULT_MAX_DEVICES
+    linger: float = DEFAULT_LINGER_S
     open_browser: bool = True  # in USB mode, auto-open the phone browser via adb
     token: str = field(default_factory=lambda: secrets.token_urlsafe(16))
     verbose: bool = False
@@ -124,6 +132,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="USB dock mode via adb reverse (default auto: use it when a device is attached)",
     )
     p.add_argument(
+        "--max-devices",
+        type=int,
+        default=DEFAULT_MAX_DEVICES,
+        metavar="N",
+        help=f"maximum simultaneously connected devices (default {DEFAULT_MAX_DEVICES})",
+    )
+    p.add_argument(
+        "--linger",
+        type=float,
+        default=DEFAULT_LINGER_S,
+        metavar="SECONDS",
+        help="keep a disconnected device's screen this long awaiting reconnect "
+        f"(default {DEFAULT_LINGER_S:.0f}; 0 removes it immediately)",
+    )
+    p.add_argument(
         "--no-open",
         dest="open_browser",
         action="store_false",
@@ -154,6 +177,8 @@ def config_from_args(argv: list[str] | None = None) -> Config:
         transport=args.transport,
         input_mode=args.input_mode,
         usb=args.usb,
+        max_devices=args.max_devices,
+        linger=args.linger,
         open_browser=args.open_browser,
         verbose=args.verbose,
     )

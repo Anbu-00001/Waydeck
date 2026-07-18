@@ -1,6 +1,11 @@
 """HTTP + WebSocket server: serves the browser client, negotiates transport,
-relays video frames out and input events in. One phone at a time (v1);
-a newer connection replaces the current one."""
+relays video frames out and input events in.
+
+M2.1: multi-device. Each connecting phone acquires a Device (its own virtual
+monitor + compositor session) from the DeviceManager; reconnects presenting
+a known device id reattach to the lingering monitor instead of creating a
+new one. A connection presenting the id of an actively-connected device
+displaces that connection (latest wins, same policy as Phase 1)."""
 
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ from aiohttp import WSMsgType, web
 
 from .. import __version__
 from ..config import Config
+from ..device import Device, DeviceError, DeviceManager
 from ..input.router import InputRouter
 from ..stream import encoder as enc
 from ..stream.capture import ClientPipeline
@@ -69,22 +75,16 @@ class FrameRelay:
 
 
 class WaydeckServer:
-    def __init__(self, cfg: Config, runner, target: str, injector) -> None:
+    def __init__(self, cfg: Config, runner, manager: DeviceManager) -> None:
         self.cfg = cfg
         self.runner = runner
-        self.target = target  # pipewiresrc target-object (object.serial)
-        self.injector = injector
-        # Actual size can differ from requested if the compositor overrides.
-        self.size: tuple[int, int] = (cfg.width, cfg.height)
+        self.manager = manager
         self.h264: enc.H264Encoder | None = None
-        self.on_client_change = lambda desc: None  # CLI status line hook
-        self._current_ws: web.WebSocketResponse | None = None
         self._app = web.Application()
         self._app.router.add_get("/", self._index)
         self._app.router.add_get("/client.js", self._static("client.js", "text/javascript"))
         self._app.router.add_get("/style.css", self._static("style.css", "text/css"))
         self._app.router.add_get("/ws", self._ws)
-        self._runner_site: web.TCPSite | None = None
         self._web_runner: web.AppRunner | None = None
 
     def detect_h264(self) -> None:
@@ -102,8 +102,7 @@ class WaydeckServer:
             await site.start()
 
     async def stop(self) -> None:
-        if self._current_ws is not None:
-            await self._current_ws.close(code=1001, message=b"server shutting down")
+        await self.manager.shutdown()
         if self._web_runner:
             await self._web_runner.cleanup()
 
@@ -139,11 +138,7 @@ class WaydeckServer:
             await ws.close(code=proto.CLOSE_BAD_TOKEN, message=b"bad token")
             return ws
 
-        if self._current_ws is not None:
-            log.info("new client connected; replacing the previous one")
-            await self._current_ws.close(code=proto.CLOSE_REPLACED, message=b"replaced")
-        self._current_ws = ws
-
+        device: Device | None = None
         pipeline: ClientPipeline | None = None
         router: InputRouter | None = None
         sender: asyncio.Task | None = None
@@ -160,10 +155,25 @@ class WaydeckServer:
                 await ws.close(code=proto.CLOSE_UNSUPPORTED, message=b"unsupported")
                 return ws
 
-            w, h = self.size
+            try:
+                device = await self.manager.acquire(hello.device_id, hello.user_agent)
+            except DeviceError as e:
+                await ws.send_json({"t": "error", "msg": str(e)})
+                await ws.close(code=proto.CLOSE_UNSUPPORTED, message=b"device limit")
+                device = None
+                return ws
+
+            if device.ws is not None and not device.ws.closed:
+                log.info("displacing previous connection of device %s", device.id)
+                await device.ws.close(code=proto.CLOSE_REPLACED, message=b"replaced")
+            device.ws = ws
+
+            w, h = device.size
             await ws.send_json(
                 {
                     "t": "config",
+                    "device": device.id,
+                    "name": device.name,
                     "transport": transport,
                     "codec": self.h264.codec if transport == proto.TRANSPORT_H264 else None,
                     "width": w,
@@ -172,8 +182,9 @@ class WaydeckServer:
                     "version": __version__,
                 }
             )
-            self.on_client_change(f"{peer} · {transport}")
-            log.info("client %s connected (%s, %s)", peer, transport, hello.user_agent[:60])
+            log.info(
+                "client %s -> device %s (%s, %s)", peer, device.id, transport, device.name
+            )
 
             loop = asyncio.get_running_loop()
             relay = FrameRelay(
@@ -194,7 +205,7 @@ class WaydeckServer:
             )
             pipeline = await self.runner.acall(
                 ClientPipeline,
-                self.target,
+                device.target,
                 w,
                 h,
                 fragment,
@@ -203,10 +214,10 @@ class WaydeckServer:
             )
 
             router = InputRouter(
-                self.injector,
+                device.injector,
                 self.runner.fire,
                 self.cfg.input_mode,
-                self.size,
+                device.size,
                 call_later=lambda d, fn: loop.call_later(d, fn),
                 cancel=lambda handle: handle.cancel(),
             )
@@ -219,9 +230,8 @@ class WaydeckServer:
                 router.release_all()
             if pipeline:
                 self.runner.fire(pipeline.stop)
-            if self._current_ws is ws:
-                self._current_ws = None
-                self.on_client_change("")
+            if device is not None and device.ws is ws:
+                self.manager.release(device)
             log.info("client %s disconnected", peer)
         return ws
 
