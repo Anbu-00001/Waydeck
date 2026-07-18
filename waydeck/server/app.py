@@ -38,18 +38,18 @@ class FrameRelay:
     def __init__(self, h264: bool, request_keyframe) -> None:
         self._h264 = h264
         self._request_keyframe = request_keyframe
-        self._frames: deque[tuple[bytes, bool]] = deque()
+        self._frames: deque[tuple[bytes, bool, float | None]] = deque()
         self._waiting_key = False
         self._event = asyncio.Event()
 
-    def feed(self, data: bytes, keyframe: bool) -> None:
+    def feed(self, data: bytes, keyframe: bool, encode_ms: float | None) -> None:
         """Runs on the asyncio loop (via call_soon_threadsafe)."""
         if self._h264:
             if self._waiting_key:
                 if not keyframe:
                     return
                 self._waiting_key = False
-            self._frames.append((data, keyframe))
+            self._frames.append((data, keyframe, encode_ms))
             if len(self._frames) > H264_BACKLOG_LIMIT:
                 self._frames.clear()
                 self._waiting_key = True
@@ -57,10 +57,10 @@ class FrameRelay:
                 return
         else:
             self._frames.clear()
-            self._frames.append((data, keyframe))
+            self._frames.append((data, keyframe, encode_ms))
         self._event.set()
 
-    async def drain(self) -> list[tuple[bytes, bool]]:
+    async def drain(self) -> list[tuple[bytes, bool, float | None]]:
         await self._event.wait()
         self._event.clear()
         out = list(self._frames)
@@ -183,8 +183,9 @@ class WaydeckServer:
                 ),
             )
 
-            def on_frame(data: bytes, key: bool) -> None:  # GStreamer thread
-                loop.call_soon_threadsafe(relay.feed, data, key)
+            def on_frame(data: bytes, key: bool, encode_ms: float | None) -> None:
+                # GStreamer thread
+                loop.call_soon_threadsafe(relay.feed, data, key, encode_ms)
 
             fragment = (
                 self.h264.fragment
@@ -240,9 +241,9 @@ class WaydeckServer:
     async def _send_frames(self, ws: web.WebSocketResponse, relay: FrameRelay) -> None:
         try:
             while not ws.closed:
-                for data, key in await relay.drain():
+                for data, key, encode_ms in await relay.drain():
                     await ws.send_bytes(
-                        proto.pack_video_frame(data, key, time.time() * 1000.0)
+                        proto.pack_video_frame(data, key, time.time() * 1000.0, encode_ms)
                     )
         except (ConnectionResetError, asyncio.CancelledError):
             pass

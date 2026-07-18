@@ -1,20 +1,30 @@
+import pytest
+
 from waydeck.server import protocol as p
 
 
 def test_frame_roundtrip():
     payload = b"\x00\x01\x02jpeg-ish"
-    frame = p.pack_video_frame(payload, keyframe=True, send_time_ms=1234.5)
-    ftype, key, ts = p.unpack_header(frame)
+    frame = p.pack_video_frame(payload, keyframe=True, send_time_ms=1234.5, capture_encode_ms=7.5)
+    ftype, key, ts, encode_ms = p.unpack_header(frame)
     assert ftype == p.FRAME_TYPE_VIDEO
     assert key is True
     assert ts == 1234.5
+    assert encode_ms == pytest.approx(7.5, abs=1e-3)
     assert frame[p.HEADER_SIZE:] == payload
 
 
 def test_delta_frame_flag():
-    frame = p.pack_video_frame(b"x", keyframe=False, send_time_ms=0.0)
-    _, key, _ = p.unpack_header(frame)
+    frame = p.pack_video_frame(b"x", keyframe=False, send_time_ms=0.0, capture_encode_ms=None)
+    _, key, _, encode_ms = p.unpack_header(frame)
     assert key is False
+    assert encode_ms is None
+
+
+def test_capture_encode_ms_none_roundtrips_as_none():
+    frame = p.pack_video_frame(b"x", keyframe=True, send_time_ms=0.0, capture_encode_ms=None)
+    *_rest, encode_ms = p.unpack_header(frame)
+    assert encode_ms is None
 
 
 def test_token_check():

@@ -1,12 +1,25 @@
 /* waydeck browser client.
  *
- * One WebSocket carries everything: binary video frames (12-byte header:
- * u8 type, u8 flags, u16 reserved, f64 server-time-ms) and JSON text for
- * handshake, input and ping/pong. Video path is negotiated: H.264 via
- * WebCodecs when this page runs in a secure context (USB/localhost or TLS),
- * JPEG + createImageBitmap otherwise.
+ * One WebSocket carries everything: binary video frames (16-byte header:
+ * u8 type, u8 flags, u16 reserved, f64 server-send-time-ms, f32
+ * capture+encode-ms [NaN if unmeasured]) and JSON text for handshake, input
+ * and ping/pong. Video path is negotiated: H.264 via WebCodecs when this
+ * page runs in a secure context (USB/localhost or TLS), JPEG +
+ * createImageBitmap otherwise.
+ *
+ * Latency HUD (▤): each frame carries the server's capture+encode time.
+ * Network latency = arrival time vs. send time (via the ping/pong clock
+ * sync). Decode+render latency = time from arrival to the pixels actually
+ * landing on the canvas. Together these three numbers are the blueprint's
+ * budget breakdown (capture+encode / network / decode+render), not just an
+ * aggregate round-trip guess.
  */
 'use strict';
+
+const HEADER_SIZE = 16;
+const BUDGET_CAPTURE_ENCODE_MS = 25;
+const BUDGET_NETWORK_MS = 5; // meaningful over USB; LAN/WiFi will exceed it
+const BUDGET_DECODE_RENDER_MS = 40;
 
 const TOKEN = new URLSearchParams(location.search).get('t') || '';
 
@@ -25,15 +38,50 @@ let waitingKey = true;
 let reconnectDelay = 1;
 let stopped = false;
 
-// stats
+// stats — sums/counts reset every HUD tick (see setInterval below), so the
+// displayed numbers are a true per-second average, not a single sample.
 let framesRendered = 0;
 let bytesReceived = 0;
-let lastFrameServerTs = 0;
-let renderLatencyMs = 0;
 let rttMs = 0;
 let clockOffsetMs = 0; // performance.now() + offset ≈ server epoch ms
+let clockSynced = false;
 let fps = 0;
 let mbps = 0;
+function freshLegs() {
+  return {
+    captureEncode: { sum: 0, n: 0 },
+    network: { sum: 0, n: 0 },
+    decodeRender: { sum: 0, n: 0 },
+  };
+}
+// Per-second bucket for the HUD (reset every tick) plus a per-connection
+// lifetime bucket (reset only on reconnect) — a single 1s snapshot can land
+// in a quiet gap between bursts of activity, but the lifetime average can't.
+const latencyAcc = freshLegs();
+const latencyLifetime = freshLegs();
+const latencyAvg = { captureEncode: null, network: null, decodeRender: null };
+
+function accumulate(bucket, value) {
+  if (value === null || Number.isNaN(value)) return;
+  bucket.sum += value;
+  bucket.n += 1;
+}
+
+/* Called once a frame's pixels have actually landed on the canvas — the
+ * single point where all three latency legs are known for that frame. */
+function recordFrameLatency(sendTimeMs, captureEncodeMs, tRecv) {
+  const networkMs = clockSynced ? (tRecv + clockOffsetMs) - sendTimeMs : null;
+  const decodeRenderMs = performance.now() - tRecv;
+  for (const [bucket, val] of [
+    [latencyAcc.captureEncode, captureEncodeMs], [latencyLifetime.captureEncode, captureEncodeMs],
+    [latencyAcc.network, networkMs], [latencyLifetime.network, networkMs],
+    [latencyAcc.decodeRender, decodeRenderMs], [latencyLifetime.decodeRender, decodeRenderMs],
+  ]) accumulate(bucket, val);
+}
+
+function avgOf(bucket) {
+  return bucket.n ? bucket.sum / bucket.n : null;
+}
 
 function setOverlay(msg) {
   if (msg === null) {
@@ -91,11 +139,14 @@ function onText(msg) {
       if (cfg.transport === 'h264') setupDecoder(cfg.codec);
       reconnectDelay = 1;
       setOverlay(null);
+      for (const leg of Object.values(latencyLifetime)) { leg.sum = 0; leg.n = 0; }
+      totalFrames = 0;
       break;
     case 'pong': {
       const now = performance.now();
       rttMs = now - msg.t0;
       clockOffsetMs = msg.t1 + rttMs / 2 - now;
+      clockSynced = true;
       break;
     }
     case 'error':
@@ -106,10 +157,22 @@ function onText(msg) {
 
 /* ---------------- video: h264 / webcodecs ---------------- */
 
+// VideoDecoder's output callback only hands back the VideoFrame, so per-frame
+// metadata (needed for the latency HUD) rides alongside in this FIFO queue.
+// Safe because both encoder (bframes=0 / zerolatency tune) and decoder
+// (optimizeForLatency) are configured not to reorder frames.
+const h264Meta = [];
+
 function setupDecoder(codec) {
   waitingKey = true;
+  h264Meta.length = 0;
   decoder = new VideoDecoder({
-    output: (frame) => { paint(frame); frame.close(); },
+    output: (frame) => {
+      const meta = h264Meta.shift();
+      paint(frame);
+      if (meta) recordFrameLatency(meta.sendTimeMs, meta.encodeMs, meta.tRecv);
+      frame.close();
+    },
     error: (e) => {
       console.error('decoder', e);
       setOverlay('decoder error — reconnecting');
@@ -123,24 +186,26 @@ function setupDecoder(codec) {
 function teardownDecoder() {
   if (decoder && decoder.state !== 'closed') decoder.close();
   decoder = null;
+  h264Meta.length = 0;
 }
 
 /* ---------------- video: jpeg fallback ---------------- */
 
-let pendingJpeg = null;
+let pendingJpeg = null; // { payload, sendTimeMs, encodeMs, tRecv }
 let jpegBusy = false;
 
-function decodeJpeg(payload) {
-  pendingJpeg = payload;
+function decodeJpeg(payload, sendTimeMs, encodeMs, tRecv) {
+  pendingJpeg = { payload, sendTimeMs, encodeMs, tRecv };
   if (jpegBusy) return; // latest-wins: this one is picked up when current finishes
   jpegBusy = true;
   const pump = () => {
-    const data = pendingJpeg;
+    const { payload: data, sendTimeMs: st, encodeMs: em, tRecv: tr } = pendingJpeg;
     pendingJpeg = null;
     createImageBitmap(new Blob([data], { type: 'image/jpeg' }))
       .then((bmp) => {
         paint(bmp);
         bmp.close();
+        recordFrameLatency(st, em, tr);
         if (pendingJpeg) pump(); else jpegBusy = false;
       })
       .catch(() => { jpegBusy = false; });
@@ -151,37 +216,42 @@ function decodeJpeg(payload) {
 /* ---------------- shared frame path ---------------- */
 
 function onBinary(buf) {
+  const tRecv = performance.now();
   const dv = new DataView(buf);
   if (dv.getUint8(0) !== 1) return; // not a video frame
   const key = (dv.getUint8(1) & 1) !== 0;
-  lastFrameServerTs = dv.getFloat64(4, true);
+  const sendTimeMs = dv.getFloat64(4, true);
+  const encodeMsRaw = dv.getFloat32(12, true);
+  const encodeMs = Number.isNaN(encodeMsRaw) ? null : encodeMsRaw;
   bytesReceived += buf.byteLength;
-  const payload = new Uint8Array(buf, 12);
+  const payload = new Uint8Array(buf, HEADER_SIZE);
 
   if (cfg && cfg.transport === 'h264' && decoder) {
     if (waitingKey && !key) return;
     waitingKey = false;
     try {
+      h264Meta.push({ sendTimeMs, encodeMs, tRecv });
       decoder.decode(new EncodedVideoChunk({
         type: key ? 'key' : 'delta',
-        timestamp: performance.now() * 1000,
+        timestamp: tRecv * 1000,
         data: payload,
       }));
     } catch (e) {
+      h264Meta.pop();
       console.error(e);
       ws.close();
     }
   } else {
-    decodeJpeg(payload);
+    decodeJpeg(payload, sendTimeMs, encodeMs, tRecv);
   }
 }
+
+let totalFrames = 0;
 
 function paint(source) {
   ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
   framesRendered += 1;
-  if (clockOffsetMs && lastFrameServerTs) {
-    renderLatencyMs = performance.now() + clockOffsetMs - lastFrameServerTs;
-  }
+  totalFrames += 1;
 }
 
 /* ---------------- layout ---------------- */
@@ -355,14 +425,55 @@ function wakeButtons() {
 }
 wakeButtons();
 
+function drainAvg(bucket) {
+  const avg = bucket.n ? bucket.sum / bucket.n : null;
+  bucket.sum = 0;
+  bucket.n = 0;
+  return avg;
+}
+
+function budgetMark(ms, budget) {
+  if (ms === null) return '  n/a';
+  return `${ms <= budget ? '✓' : '✗'} ${ms.toFixed(1)}`;
+}
+
 setInterval(() => {
   fps = framesRendered; framesRendered = 0;
   mbps = (bytesReceived * 8) / 1e6; bytesReceived = 0;
+  latencyAvg.captureEncode = drainAvg(latencyAcc.captureEncode);
+  latencyAvg.network = drainAvg(latencyAcc.network);
+  latencyAvg.decodeRender = drainAvg(latencyAcc.decodeRender);
+
+  // Exposed for automated/CDP-driven verification and debugging; also the
+  // cleanest way to read exact numbers off a headless run. `lifetime` is a
+  // running average since connect, immune to a query landing in a quiet
+  // 1-second gap between bursts of on-screen activity.
+  window.__wdStats = {
+    transport: cfg && cfg.transport,
+    codec: cfg && cfg.codec,
+    fps,
+    mbps,
+    rttMs,
+    lastSecond: {
+      captureEncodeMs: latencyAvg.captureEncode,
+      networkMs: latencyAvg.network,
+      decodeRenderMs: latencyAvg.decodeRender,
+    },
+    lifetime: {
+      frames: totalFrames,
+      captureEncodeMs: avgOf(latencyLifetime.captureEncode),
+      networkMs: avgOf(latencyLifetime.network),
+      decodeRenderMs: avgOf(latencyLifetime.decodeRender),
+    },
+  };
+
   if (!hud.classList.contains('hidden') && cfg) {
     hud.textContent =
       `${cfg.transport}${cfg.transport === 'h264' ? ` (${cfg.codec})` : ''}  ${cfg.width}×${cfg.height}\n` +
-      `fps ${fps}   ${mbps.toFixed(1)} Mb/s\n` +
-      `rtt ${rttMs.toFixed(0)} ms   e2e ~${renderLatencyMs.toFixed(0)} ms\n` +
+      `fps ${fps}   ${mbps.toFixed(1)} Mb/s   rtt ${rttMs.toFixed(0)} ms\n` +
+      `capture+encode ${budgetMark(latencyAvg.captureEncode, BUDGET_CAPTURE_ENCODE_MS)} ms  (budget ${BUDGET_CAPTURE_ENCODE_MS})\n` +
+      `network        ${budgetMark(latencyAvg.network, BUDGET_NETWORK_MS)} ms  (budget ${BUDGET_NETWORK_MS}, USB)\n` +
+      `decode+render  ${budgetMark(latencyAvg.decodeRender, BUDGET_DECODE_RENDER_MS)} ms  (budget ${BUDGET_DECODE_RENDER_MS})\n` +
       `input ${cfg.inputMode}   waydeck ${cfg.version}`;
   }
 }, 1000);

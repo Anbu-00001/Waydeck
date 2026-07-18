@@ -173,8 +173,10 @@ class KeepalivePipeline(_BasePipeline):
 class ClientPipeline(_BasePipeline):
     """pipewiresrc -> videoconvert -> encoder -> appsink, one per client.
 
-    `on_frame(data, is_keyframe)` is invoked on a GStreamer streaming thread —
-    the caller must trampoline into its own event loop.
+    `on_frame(data, is_keyframe, capture_encode_ms)` is invoked on a
+    GStreamer streaming thread — the caller must trampoline into its own
+    event loop. `capture_encode_ms` is `None` when it can't be measured
+    (buffer PTS missing) rather than a fabricated number.
     """
 
     def __init__(
@@ -183,7 +185,7 @@ class ClientPipeline(_BasePipeline):
         width: int,
         height: int,
         encoder_fragment: str,
-        on_frame: Callable[[bytes, bool], None],
+        on_frame: Callable[[bytes, bool, float | None], None],
         on_error: Callable[[str], None],
     ) -> None:
         super().__init__()
@@ -203,12 +205,27 @@ class ClientPipeline(_BasePipeline):
         self._appsink.connect("new-sample", self._new_sample)
         self._play()
 
+    def _capture_encode_ms(self, buf: Gst.Buffer) -> float | None:
+        """Wall-clock time from when this buffer was captured (its PTS, in
+        the pipeline's running-time domain — set by pipewiresrc's
+        do-timestamp=true and preserved through videoconvert/encoder/parse)
+        to right now, i.e. capture+convert+encode latency for this frame."""
+        if buf.pts == Gst.CLOCK_TIME_NONE:
+            return None
+        clock = self._pipeline.get_clock()
+        base_time = self._pipeline.get_base_time()
+        if clock is None or base_time == Gst.CLOCK_TIME_NONE:
+            return None
+        running_time_now = clock.get_time() - base_time
+        return max(0.0, (running_time_now - buf.pts) / Gst.MSECOND)
+
     def _new_sample(self, sink) -> Gst.FlowReturn:
         sample = sink.emit("pull-sample")
         if sample is None:
             return Gst.FlowReturn.OK
         buf = sample.get_buffer()
         is_key = not buf.has_flags(Gst.BufferFlags.DELTA_UNIT)
+        encode_ms = self._capture_encode_ms(buf)
         ok, mapinfo = buf.map(Gst.MapFlags.READ)
         if not ok:
             return Gst.FlowReturn.OK
@@ -216,7 +233,7 @@ class ClientPipeline(_BasePipeline):
             data = bytes(mapinfo.data)
         finally:
             buf.unmap(mapinfo)
-        self._on_frame(data, is_key)
+        self._on_frame(data, is_key, encode_ms)
         return Gst.FlowReturn.OK
 
     def force_keyframe(self) -> None:

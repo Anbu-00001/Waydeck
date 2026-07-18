@@ -1,26 +1,28 @@
 """Wire protocol shared with the browser client (see static/client.js).
 
 One WebSocket carries everything:
-  * binary, server -> client: video frames with a 12-byte header
+  * binary, server -> client: video frames with a 16-byte header
   * JSON text, both ways: hello/config handshake, input events, ping/pong
 
 Binary frame header (little-endian):
-  u8   type       (1 = video)
-  u8   flags      (bit 0 = keyframe)
+  u8   type              (1 = video)
+  u8   flags              (bit 0 = keyframe)
   u16  reserved
   f64  server send time, ms since epoch (for the client's latency HUD)
+  f32  capture+encode ms, NaN if unmeasured (see stream/capture.py)
 """
 
 from __future__ import annotations
 
 import hmac
+import math
 import struct
 from dataclasses import dataclass
 
 FRAME_TYPE_VIDEO = 1
 FLAG_KEYFRAME = 0b0000_0001
 
-_HEADER = struct.Struct("<BBHd")
+_HEADER = struct.Struct("<BBHdf")
 HEADER_SIZE = _HEADER.size
 
 TRANSPORT_JPEG = "jpeg"
@@ -32,16 +34,19 @@ CLOSE_BAD_TOKEN = 4003
 CLOSE_UNSUPPORTED = 4005
 
 
-def pack_video_frame(payload: bytes, keyframe: bool, send_time_ms: float) -> bytes:
+def pack_video_frame(
+    payload: bytes, keyframe: bool, send_time_ms: float, capture_encode_ms: float | None
+) -> bytes:
     flags = FLAG_KEYFRAME if keyframe else 0
-    return _HEADER.pack(FRAME_TYPE_VIDEO, flags, 0, send_time_ms) + payload
+    encode_field = math.nan if capture_encode_ms is None else capture_encode_ms
+    return _HEADER.pack(FRAME_TYPE_VIDEO, flags, 0, send_time_ms, encode_field) + payload
 
 
-def unpack_header(data: bytes) -> tuple[int, bool, float]:
-    """Returns (type, keyframe, send_time_ms). Used by tests; the JS client
-    mirrors this parsing."""
-    ftype, flags, _, ts = _HEADER.unpack_from(data)
-    return ftype, bool(flags & FLAG_KEYFRAME), ts
+def unpack_header(data: bytes) -> tuple[int, bool, float, float | None]:
+    """Returns (type, keyframe, send_time_ms, capture_encode_ms). Used by
+    tests; the JS client mirrors this parsing."""
+    ftype, flags, _, ts, encode_ms = _HEADER.unpack_from(data)
+    return ftype, bool(flags & FLAG_KEYFRAME), ts, (None if math.isnan(encode_ms) else encode_ms)
 
 
 def token_ok(expected: str, presented: str | None) -> bool:
