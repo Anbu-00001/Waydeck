@@ -38,6 +38,7 @@ class Config:
     max_devices: int = DEFAULT_MAX_DEVICES
     linger: float = DEFAULT_LINGER_S
     gui: bool = False
+    setup_placement: bool = False
     open_browser: bool = True  # in USB mode, auto-open the phone browser via adb
     token: str = field(default_factory=lambda: secrets.token_urlsafe(16))
     verbose: bool = False
@@ -165,6 +166,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="open the waydeck window (pairing QR + connected phones) instead "
         "of the terminal interface",
     )
+    p.add_argument(
+        "--setup-placement",
+        action="store_true",
+        help="install the GNOME helper that keeps apps opened from the phone "
+        "screen on the phone screen, then exit",
+    )
     p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return p
 
@@ -187,6 +194,7 @@ def config_from_args(argv: list[str] | None = None) -> Config:
         max_devices=args.max_devices,
         linger=args.linger,
         gui=args.gui,
+        setup_placement=args.setup_placement,
         open_browser=args.open_browser,
         verbose=args.verbose,
     )

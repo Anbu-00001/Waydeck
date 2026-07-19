@@ -84,6 +84,13 @@ def main(argv: list[str] | None = None) -> int:
     if warning:
         return _fail(warning)
 
+    if cfg.setup_placement:
+        from .placement import install
+
+        active, msg = install()
+        print(f"  {green('✓') if active else yellow('!')} {msg}")
+        return 0 if active else 1
+
     if cfg.gui:
         from .gui.app import run_gui
 
@@ -122,7 +129,12 @@ def _print_ready(cfg: Config, info: ServeInfo) -> None:
         f"Each phone that connects gets its own screen (up to "
         f"{cfg.max_devices}). Ctrl-C stops everything."
     )
-    print(f"  {dim(hint)}\n")
+    print(f"  {dim(hint)}")
+    if info.placement_version is None:
+        tip = ("tip: run `waydeck --setup-placement` once so apps you open "
+               "from the phone stay on the phone")
+        print(f"  {dim(tip)}")
+    print()
 
 
 async def _run(cfg: Config) -> int:

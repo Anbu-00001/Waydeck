@@ -36,6 +36,7 @@ class ServeInfo:
     usb_active: bool
     usb_serial: str | None
     h264_kind: str | None
+    placement_version: int | None  # placement extension, None = not active
     manager: DeviceManager
     loop: asyncio.AbstractEventLoop
     request_shutdown: Callable[[str], None]  # safe to call from any thread
@@ -115,6 +116,10 @@ async def serve(
         if usb_active and cfg.open_browser:
             usb.open_url(usb_url)
 
+        from . import placement
+
+        placement_version = await runner.acall(placement.detect)
+
         on_ready(
             ServeInfo(
                 screencast_version=version,
@@ -123,6 +128,7 @@ async def serve(
                 usb_active=usb_active,
                 usb_serial=usb_serial,
                 h264_kind=server.h264.kind if server.h264 else None,
+                placement_version=placement_version,
                 manager=manager,
                 loop=loop,
                 request_shutdown=request_shutdown_threadsafe,

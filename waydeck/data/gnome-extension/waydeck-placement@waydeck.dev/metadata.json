@@ -1,0 +1,7 @@
+{
+  "uuid": "waydeck-placement@waydeck.dev",
+  "name": "Waydeck Placement",
+  "description": "Keeps apps opened from a waydeck phone screen on that screen, and lets waydeck move windows programmatically. Ships with the waydeck project.",
+  "shell-version": ["45", "46", "47", "48"],
+  "url": "https://github.com/Anbu-00001/Waydeck"
+}
