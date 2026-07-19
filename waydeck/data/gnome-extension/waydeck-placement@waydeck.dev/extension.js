@@ -66,8 +66,11 @@ export default class WaydeckPlacementExtension extends Extension {
         }
     }
 
+    /* Bumped on every code change: GJS caches ES modules for the life of
+     * the shell process, so this is the only reliable way to tell which
+     * revision is actually running. */
     get Version() {
-        return 1;
+        return 3;
     }
 
     _virtualMonitorIndices() {
@@ -85,29 +88,81 @@ export default class WaydeckPlacementExtension extends Extension {
 
     _onWindowCreated(win) {
         try {
+            const title = () => {
+                try {
+                    return win.get_title() ?? '?';
+                } catch (_e) {
+                    return '?';
+                }
+            };
             if (win.get_window_type() !== Meta.WindowType.NORMAL)
                 return;
             if (win.get_transient_for() !== null || win.skip_taskbar)
                 return;
             const focus = global.display.get_focus_window();
-            if (!focus || focus === win)
+            if (!focus || focus === win) {
+                console.log(`waydeck-placement: ${title()} — no usable focus, skip`);
                 return;
+            }
             const target = focus.get_monitor();
-            if (target < 0 || !this._virtualMonitorIndices().includes(target))
+            if (target < 0 || !this._virtualMonitorIndices().includes(target)) {
+                console.log(
+                    `waydeck-placement: ${title()} — focus monitor ${target} ` +
+                    'not virtual, skip');
                 return;
-            // Idle: run after mutter's own placement decision for the window.
-            GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
-                try {
-                    if (win.get_monitor() !== target)
-                        win.move_to_monitor(target);
-                } catch (_e) {
-                    // window vanished before the idle ran — nothing to do
-                }
-                return GLib.SOURCE_REMOVE;
-            });
+            }
+            console.log(
+                `waydeck-placement: escorting ${title()} to monitor ${target}`);
+            this._escort(win, target);
         } catch (e) {
             console.warn(`waydeck-placement: ${e}`);
         }
+    }
+
+    /* Timing is the whole game: mutter's Wayland placement pass runs at
+     * first map (after window-created) and apps like gnome-text-editor
+     * self-position even later during session restore — a single early
+     * move gets silently overridden. So escort the window: re-assert the
+     * target monitor on every position change during its first moments,
+     * then let go. */
+    _escort(win, target, escortMs = 3000) {
+        const moveNow = why => {
+            try {
+                if (win.get_monitor() !== target) {
+                    win.move_to_monitor(target);
+                    console.log(
+                        `waydeck-placement: moved (${why}) -> ` +
+                        `now on ${win.get_monitor()}`);
+                }
+            } catch (_e) {
+                // window vanished — nothing to do
+            }
+        };
+        let posId = win.connect('position-changed', () => moveNow('position-changed'));
+        const stop = () => {
+            if (posId) {
+                try {
+                    win.disconnect(posId);
+                } catch (_e) {
+                    // already disposed with the window
+                }
+                posId = null;
+            }
+        };
+        const actor = win.get_compositor_private();
+        if (actor) {
+            const id = actor.connect('first-frame', () => {
+                actor.disconnect(id);
+                moveNow('first-frame');
+            });
+        } else {
+            console.log('waydeck-placement: no actor yet, relying on escort');
+        }
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, escortMs, () => {
+            moveNow('final');
+            stop();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     // -- D-Bus methods ------------------------------------------------------
