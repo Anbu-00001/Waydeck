@@ -37,6 +37,7 @@ class Config:
     usb: str = "auto"  # auto | on | off
     max_devices: int = DEFAULT_MAX_DEVICES
     linger: float = DEFAULT_LINGER_S
+    gui: bool = False
     open_browser: bool = True  # in USB mode, auto-open the phone browser via adb
     token: str = field(default_factory=lambda: secrets.token_urlsafe(16))
     verbose: bool = False
@@ -158,6 +159,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TOKEN",
         help="session token (default: random per run; embedded in the QR URL)",
     )
+    p.add_argument(
+        "--gui",
+        action="store_true",
+        help="open the waydeck window (pairing QR + connected phones) instead "
+        "of the terminal interface",
+    )
     p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return p
 
@@ -179,6 +186,7 @@ def config_from_args(argv: list[str] | None = None) -> Config:
         usb=args.usb,
         max_devices=args.max_devices,
         linger=args.linger,
+        gui=args.gui,
         open_browser=args.open_browser,
         verbose=args.verbose,
     )

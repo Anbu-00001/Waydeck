@@ -21,10 +21,16 @@ from gi.repository import GLib  # noqa: E402
 
 
 class GLibRunner:
-    def __init__(self) -> None:
-        self._loop = GLib.MainLoop()
-        self._thread = threading.Thread(target=self._run, name="glib-loop", daemon=True)
-        self._started = threading.Event()
+    """`external=True` when something else (the GTK application) already
+    iterates the default GLib main context on its own thread — fire/call
+    still marshal work there via idle_add, but no loop thread is spawned."""
+
+    def __init__(self, external: bool = False) -> None:
+        self._external = external
+        if not external:
+            self._loop = GLib.MainLoop()
+            self._thread = threading.Thread(target=self._run, name="glib-loop", daemon=True)
+            self._started = threading.Event()
 
     def _run(self) -> None:
         # Make this thread the home for Gio async callbacks and GStreamer
@@ -34,10 +40,14 @@ class GLibRunner:
         self._loop.run()
 
     def start(self) -> None:
+        if self._external:
+            return
         self._thread.start()
         self._started.wait(timeout=5)
 
     def stop(self) -> None:
+        if self._external:
+            return
         GLib.idle_add(self._loop.quit)
         self._thread.join(timeout=5)
 
