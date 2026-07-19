@@ -37,6 +37,7 @@ class ServeInfo:
     usb_serial: str | None
     h264_kind: str | None
     placement_version: int | None  # placement extension, None = not active
+    tiling_warning: str | None  # tiling-assistant crash risk, None = no conflict/tamed
     manager: DeviceManager
     loop: asyncio.AbstractEventLoop
     request_shutdown: Callable[[str], None]  # safe to call from any thread
@@ -83,9 +84,12 @@ async def serve(
             "is this a GNOME session on Wayland?"
         )
 
+    from . import placement
+
     manager = DeviceManager(cfg, runner, on_event=on_event)
     server = WaydeckServer(cfg, runner, manager)
     usb = None
+    tamed_tiling = False
     try:
         await runner.acall(gst_init)
         await runner.acall(server.detect_h264)
@@ -116,9 +120,19 @@ async def serve(
         if usb_active and cfg.open_browser:
             usb.open_url(usb_url)
 
-        from . import placement
-
         placement_version = await runner.acall(placement.detect)
+
+        # Ubuntu's tiling-assistant crashes GNOME on cross-monitor window
+        # moves (bug #2068539) — the exact thing waydeck does. Warn by
+        # default; with --tame-tiling, disable it for the session and put it
+        # back on the way out.
+        tiling_warning = await runner.acall(placement.tiling_conflict)
+        if tiling_warning and cfg.tame_tiling:
+            if placement.set_extension_enabled(placement.TILING_ASSISTANT_UUID, False):
+                tamed_tiling = True
+                tiling_warning = None
+                on_event("turned off tiling-assistant for this session "
+                         "(it can crash GNOME here); will restore it on exit")
 
         on_ready(
             ServeInfo(
@@ -129,6 +143,7 @@ async def serve(
                 usb_serial=usb_serial,
                 h264_kind=server.h264.kind if server.h264 else None,
                 placement_version=placement_version,
+                tiling_warning=tiling_warning,
                 manager=manager,
                 loop=loop,
                 request_shutdown=request_shutdown_threadsafe,
@@ -143,3 +158,9 @@ async def serve(
         await server.stop()
         if usb:
             usb.stop()
+        if tamed_tiling:
+            if placement.set_extension_enabled(placement.TILING_ASSISTANT_UUID, True):
+                on_event("restored tiling-assistant")
+            else:
+                on_event("could not restore tiling-assistant — re-enable it in "
+                         "GNOME Extensions if you want it back")

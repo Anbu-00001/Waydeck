@@ -149,6 +149,15 @@ class WaydeckWindow(Adw.ApplicationWindow):
                 "no app needed. You can also plug it in with a USB cable."
             )
         self._url_label.set_label(qr_url)
+        if info.tiling_warning:
+            # Persistent (timeout=0) — this one is a real crash risk, not a
+            # transient status message.
+            self._toasts.add_toast(Adw.Toast(
+                title="Ubuntu's tiling-assistant can crash GNOME when apps move to "
+                      "the phone — restart with --tame-tiling, or turn it off in "
+                      "the Extensions app.",
+                timeout=0,
+            ))
         self.refresh_devices()
 
     def show_error(self, msg: str, hint: str) -> None:

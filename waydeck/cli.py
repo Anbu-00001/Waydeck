@@ -134,6 +134,8 @@ def _print_ready(cfg: Config, info: ServeInfo) -> None:
         tip = ("tip: run `waydeck --setup-placement` once so apps you open "
                "from the phone stay on the phone")
         print(f"  {dim(tip)}")
+    if info.tiling_warning:
+        print(f"\n  {yellow('⚠')} {yellow(info.tiling_warning)}")
     print()
 
 

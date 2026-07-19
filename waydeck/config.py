@@ -39,6 +39,7 @@ class Config:
     linger: float = DEFAULT_LINGER_S
     gui: bool = False
     setup_placement: bool = False
+    tame_tiling: bool = False  # disable Ubuntu's crash-prone tiling-assistant for the session
     open_browser: bool = True  # in USB mode, auto-open the phone browser via adb
     token: str = field(default_factory=lambda: secrets.token_urlsafe(16))
     verbose: bool = False
@@ -172,6 +173,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="install the GNOME helper that keeps apps opened from the phone "
         "screen on the phone screen, then exit",
     )
+    p.add_argument(
+        "--tame-tiling",
+        action="store_true",
+        help="turn off Ubuntu's tiling-assistant extension for this session "
+        "(it can crash GNOME on 24.04 when windows move to the phone) and "
+        "restore it on exit",
+    )
     p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return p
 
@@ -195,6 +203,7 @@ def config_from_args(argv: list[str] | None = None) -> Config:
         linger=args.linger,
         gui=args.gui,
         setup_placement=args.setup_placement,
+        tame_tiling=args.tame_tiling,
         open_browser=args.open_browser,
         verbose=args.verbose,
     )
